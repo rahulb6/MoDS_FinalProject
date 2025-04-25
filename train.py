@@ -1,11 +1,8 @@
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 import warnings
 warnings.filterwarnings("ignore")
 
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -13,8 +10,9 @@ from sklearn.pipeline import Pipeline
 from xgboost import XGBRegressor
 from statsmodels.tsa.arima.model import ARIMA
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
+from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
 import joblib
 
@@ -32,7 +30,7 @@ def preprocess_data(data, scale_for_nn=False):
     Cleans and transforms the dataset, prepares it for modeling.
     """
     data.fillna(data.mean(numeric_only=True), inplace=True)
-    data['Previous_Lag'] = data['Previous_Price'].shift(1).fillna(method='bfill')
+    data['Previous_Lag'] = data['Previous_Price'].shift(1).bfill()
     data.dropna(inplace=True)
 
     X = data.drop(columns=["Food_Price"])
@@ -65,10 +63,15 @@ def train_arima(data):
     model = ARIMA(ts['Food_Price'], order=(5, 1, 0))
     model_fit = model.fit()
 
-    joblib.dump(model_fit, "arima_model.pkl")
-    print(" ARIMA model saved'")
+    joblib.dump(model_fit, "models/arima_model_2.pkl")
+    print("✅ ARIMA model '")
 
 
+def train_lstm(data):
+    """
+    Trains an LSTM model on scaled time-series food prices.
+    Saves both the model and the scaler to disk.
+    """
 def train_lstm(data):
     """
     Trains an LSTM model on scaled time-series food prices.
@@ -80,21 +83,29 @@ def train_lstm(data):
 
     series = ts['Food_Price'].values.reshape(-1, 1)
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(series)
+    series_scaled = scaler.fit_transform(series)
 
-    window = 5
-    sequence = TimeseriesGenerator(scaled, scaled, length=window, batch_size=1)
+    window = 12
+    split_idx = int(len(series_scaled) * 0.9)
+
+    train_data = series_scaled[:split_idx]
+    val_data = series_scaled[split_idx - window:]  # include overlap
+
+    train_generator = TimeseriesGenerator(train_data, train_data, length=window, batch_size=1)
+    val_generator = TimeseriesGenerator(val_data, val_data, length=window, batch_size=1)
 
     model = Sequential()
-    model.add(LSTM(50, activation='relu', input_shape=(window, 1)))
+    model.add(LSTM(64, return_sequences=True, input_shape=(window, 1)))
+    model.add(Dropout(0.2))
+    model.add(LSTM(32))
     model.add(Dense(1))
-    model.compile(optimizer='adam', loss='mse')
+    model.compile(optimizer='adam', loss=MeanSquaredError())
 
-    model.fit(sequence, epochs=30, verbose=0, callbacks=[EarlyStopping(patience=5)])
-    model.save("lstm_model.h5")
-    joblib.dump(scaler, "lstm_scaler.pkl")
+    model.fit(train_generator, validation_data=val_generator, epochs=50, verbose=1, callbacks=[EarlyStopping(patience=5)])    
+    model.save("models/lstm_model_2.h5")
+    joblib.dump(scaler, "models/lstm_scaler_2.pkl")
 
-    print("LSTM model and scaler saved")
+    print("✅ LSTM model '")
 
 
 def train_xgboost(X, y, preprocessor):
@@ -108,8 +119,8 @@ def train_xgboost(X, y, preprocessor):
     ])
 
     model.fit(X, y)
-    joblib.dump(model, "xgboost_model.pkl")
-    print("XGBoost model saved")
+    joblib.dump(model, "models/xgboost_model_2.pkl")
+    print("✅ XGBoost model '")
 
 
 def main():
