@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -21,6 +23,16 @@ def load_data(path):
     data = pd.read_csv(path)
     data.fillna(data.mean(numeric_only=True), inplace=True)
     data['Previous_Lag'] = data['Previous_Price'].shift(1).bfill()
+
+    # Feature Engineering
+    data['Rainfall_3m_avg'] = data['Rainfall'].rolling(window=3, min_periods=1).mean()
+    data['GDP_Growth_diff'] = data['GDP_Growth'].diff().bfill()
+    data['Demand_Trend'] = data['Demand_Index'].diff().bfill()
+    data['Temperature_3m_avg'] = data['Temperature'].rolling(window=3, min_periods=1).mean()
+    data['TransportCost_3m_avg'] = data['Transport_Cost'].rolling(window=3, min_periods=1).mean()
+    data['Rainfall_Demand'] = data['Rainfall'] * data['Demand_Index']
+    data['Temp_Crop'] = data['Temperature'] * data['Crop_Yield']
+
     data.dropna(inplace=True)
     return data
 
@@ -52,8 +64,8 @@ def train_arima(data):
     model = ARIMA(ts['Food_Price'], order=(5, 1, 0))
     model_fit = model.fit()
 
-    joblib.dump(model_fit, "models/arima_model_3.pkl")
-    print("✅ ARIMA model saved")
+    joblib.dump(model_fit, "models/arima_model_new.pkl")
+    print("✅ ARIMA model saved as 'models/arima_model_new.pkl'")
 
 
 def train_lstm(data):
@@ -82,16 +94,16 @@ def train_lstm(data):
     model.compile(optimizer='adam', loss=MeanSquaredError())
 
     model.fit(train_generator, validation_data=val_generator, epochs=50, verbose=1, callbacks=[EarlyStopping(patience=5)])
-    model.save("models/lstm_model_3.h5")
-    joblib.dump(scaler, "models/lstm_scaler_3.pkl")
+    model.save("models/lstm_model_new.h5")
+    joblib.dump(scaler, "models/lstm_scaler_new.pkl")
 
-    print("✅ LSTM model and scaler saved")
+    print("✅ LSTM model and scaler saved as 'models/lstm_model_final.h5' and 'models/lstm_scaler_final.pkl'")
 
 
 def train_xgboost_time_split(X, y, preprocessor):
     model = Pipeline(steps=[
         ("preprocessor", preprocessor),
-        ("regressor", XGBRegressor(random_state=42))
+        ("regressor", XGBRegressor(random_state=42, reg_lambda=1, gamma=0.2, colsample_bytree=0.5))
     ])
 
     tscv = TimeSeriesSplit(n_splits=5)
@@ -101,23 +113,47 @@ def train_xgboost_time_split(X, y, preprocessor):
     print("Average CV RMSE:", -scores.mean())
 
     model.fit(X, y)
-    joblib.dump(model, "models/xgboost_model_3.pkl")
-    print("✅ XGBoost model saved ")
+    joblib.dump(model, "models/xgboost_model_new.pkl")
+    print("✅ XGBoost model saved with engineered features as 'models/xgboost_model_new.pkl'")
+
+
+def show_feature_importance():
+    model = joblib.load("models/xgboost_model_new.pkl")
+    xgb = model.named_steps['regressor']
+    preprocessor = model.named_steps['preprocessor']
+    feature_names = preprocessor.get_feature_names_out()
+
+    importances = xgb.feature_importances_
+    importances_percent = (importances / importances.sum()) * 100
+    sorted_idx = np.argsort(importances_percent)[::-1]
+
+    print("\nTop 10 Features by Relative Importance (%):")
+    for i in range(10):
+        print(f"{feature_names[sorted_idx[i]]}: {importances_percent[sorted_idx[i]]:.2f}%")
+
+    plt.figure(figsize=(12, 8))
+    sns.barplot(x=importances_percent[sorted_idx], y=np.array(feature_names)[sorted_idx])
+    plt.title("Top Features Influencing Food Price (XGBoost)")
+    plt.xlabel("Relative Importance Score (%)")
+    plt.ylabel("Features (sorted by importance)")
+    plt.tight_layout()
+    plt.show()
 
 
 def main():
     df = load_data("food_price_prediction_dataset.csv")
 
-    print("Training ARIMA...")
+    print("\n🔁 Training ARIMA...")
     train_arima(df)
 
-    print("Training LSTM...")
+    print("\n🔁 Training LSTM...")
     train_lstm(df)
 
-    print("Preparing data and training XGBoost...")
+    print("\n🔁 Preparing data and training XGBoost...")
     X, y, preprocessor = preprocess_data(df)
     train_xgboost_time_split(X, y, preprocessor)
 
 
 if __name__ == "__main__":
     main()
+    show_feature_importance()

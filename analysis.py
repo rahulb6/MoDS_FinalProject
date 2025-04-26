@@ -18,7 +18,7 @@ y = df["Food_Price"]
 
 # --- Evaluate ARIMA ---
 def evaluate_arima():
-    model = joblib.load("models/arima_model_2.pkl")
+    model = joblib.load("models/arima_model_3.pkl")
     ts = df.groupby(['Year', 'Month'])['Food_Price'].mean().reset_index()
     ts['date'] = pd.to_datetime(ts[['Year', 'Month']].assign(DAY=1))
     ts.set_index('date', inplace=True)
@@ -33,12 +33,12 @@ def evaluate_lstm():
     ts.set_index('date', inplace=True)
     series = ts['Food_Price'].values.reshape(-1, 1)
 
-    scaler = joblib.load("models/lstm_scaler_2.pkl")
+    scaler = joblib.load("models/lstm_scaler_3.pkl")
     series_scaled = scaler.transform(series)
 
     window = 12
     generator = TimeseriesGenerator(series_scaled, series_scaled, length=window, batch_size=1)
-    model = load_model("models/lstm_model_2.h5", custom_objects={'mse': MeanSquaredError()})
+    model = load_model("models/lstm_model_3.h5", custom_objects={'mse': MeanSquaredError()})
     predictions_scaled = model.predict(generator)
 
     predictions = scaler.inverse_transform(predictions_scaled).flatten()
@@ -48,7 +48,7 @@ def evaluate_lstm():
 
 # --- Evaluate XGBoost ---
 def evaluate_xgboost():
-    model = joblib.load("models/xgboost_model_2.pkl")
+    model = joblib.load("models/xgboost_model_3.pkl")
     predictions = model.predict(X)
     return compute_metrics(y, predictions, "XGBoost")
 
