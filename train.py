@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
-warnings.filterwarnings("ignore")
 
 from sklearn.preprocessing import OneHotEncoder, StandardScaler, MinMaxScaler
 from sklearn.compose import ColumnTransformer
@@ -14,22 +16,64 @@ from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 from tensorflow.keras.losses import MeanSquaredError
 from tensorflow.keras.preprocessing.sequence import TimeseriesGenerator
-import joblib
 
+warnings.filterwarnings("ignore")
 
 def load_data(path):
     data = pd.read_csv(path)
     data.fillna(data.mean(numeric_only=True), inplace=True)
+    data['Food_Type'] = data['Food_Type'].astype(str)
+
+    # Feature Engineering
     data['Previous_Lag'] = data['Previous_Price'].shift(1).bfill()
+    data['Rainfall_3m_avg'] = data['Rainfall'].rolling(window=3, min_periods=1).mean()
+    data['GDP_Growth_diff'] = data['GDP_Growth'].diff().bfill()
+    data['Demand_Trend'] = data['Demand_Index'].diff().bfill()
+    data['Temperature_3m_avg'] = data['Temperature'].rolling(window=3, min_periods=1).mean()
+    data['TransportCost_3m_avg'] = data['Transport_Cost'].rolling(window=3, min_periods=1).mean()
+    data['Rainfall_Demand'] = data['Rainfall'] * data['Demand_Index']
+    data['Temp_Crop'] = data['Temperature'] * data['Crop_Yield']
+    data['Rainfall_Temp'] = data['Rainfall'] * data['Temperature']
+    data['Yield_Demand'] = data['Crop_Yield'] * data['Demand_Index']
+
     data.dropna(inplace=True)
+    data.to_csv(r"/Users/rahulbalasubramani/Desktop/MSIM Study Materials/2nd Sem/IS_MDS/MoDS_FinalProject/final_output/final_dataset.csv", index=False)
+    print("✅ Saved final dataset with engineered features.")
     return data
 
+def filter_numerical_features_only(preprocessor, importances):
+    feature_names = preprocessor.get_feature_names_out()
+    numerical_features = [name for name in feature_names if name.startswith("scale__")]
+    importance_dict = {name: imp for name, imp in zip(feature_names, importances) if name in numerical_features and imp > 0.0}
+    sorted_features = sorted(importance_dict.items(), key=lambda x: x[1], reverse=True)
+    return zip(*sorted_features)  # returns top_features, top_importances
+
+def plot_filtered_feature_importance(preprocessor, importances):
+    top_features, top_importances = filter_numerical_features_only(preprocessor, importances)
+    top_features = list(top_features)
+    top_importances = list(top_importances)
+
+    importances_percent = (np.array(top_importances) / np.sum(top_importances)) * 100
+
+    plt.figure(figsize=(12, 8))
+    ax = sns.barplot(x=importances_percent, y=top_features, palette="crest")
+    plt.title("Feature Importance Scores (XGBoost) - Only Engineered/Original Features")
+    plt.xlabel("Relative Importance Score (%)")
+    plt.ylabel("Features")
+    plt.xlim(0, max(importances_percent) * 1.1)
+
+    for i, v in enumerate(importances_percent):
+        ax.text(v + 0.5, i, f"{v:.2f}%", color='black', va='center')
+
+    plt.tight_layout()
+    plt.savefig(r"/Users/rahulbalasubramani/Desktop/MSIM Study Materials/2nd Sem/IS_MDS/MoDS_FinalProject/final_output/filtered_feature_importance_top10.png")
+    plt.show()
 
 def preprocess_data(data, scale_for_nn=False):
     X = data.drop(columns=["Food_Price"])
     y = data["Food_Price"]
 
-    categorical = ["Season"]
+    categorical = ["Season", "Food_Type"]
     numerical = X.drop(columns=categorical).columns.tolist()
 
     scaler = MinMaxScaler() if scale_for_nn else StandardScaler()
@@ -40,84 +84,40 @@ def preprocess_data(data, scale_for_nn=False):
             ("scale", scaler, numerical)
         ]
     )
-
     return X, y, preprocessor
 
-
-def train_arima(data):
-    ts = data.groupby(['Year', 'Month'])['Food_Price'].mean().reset_index()
-    ts['date'] = pd.to_datetime(ts[['Year', 'Month']].assign(DAY=1))
-    ts.set_index('date', inplace=True)
-
-    model = ARIMA(ts['Food_Price'], order=(5, 1, 0))
-    model_fit = model.fit()
-
-    joblib.dump(model_fit, "models/arima_model_3.pkl")
-    print("✅ ARIMA model saved")
-
-
-def train_lstm(data):
-    ts = data.groupby(['Year', 'Month'])['Food_Price'].mean().reset_index()
-    ts['date'] = pd.to_datetime(ts[['Year', 'Month']].assign(DAY=1))
-    ts.set_index('date', inplace=True)
-
-    series = ts['Food_Price'].values.reshape(-1, 1)
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(series)
-
-    window = 12
-    split_idx = int(len(scaled) * 0.9)
-
-    train_data = scaled[:split_idx]
-    val_data = scaled[split_idx - window:]
-
-    train_generator = TimeseriesGenerator(train_data, train_data, length=window, batch_size=1)
-    val_generator = TimeseriesGenerator(val_data, val_data, length=window, batch_size=1)
-
-    model = Sequential()
-    model.add(LSTM(64, return_sequences=True, input_shape=(window, 1)))
-    model.add(Dropout(0.2))
-    model.add(LSTM(32))
-    model.add(Dense(1))
-    model.compile(optimizer='adam', loss=MeanSquaredError())
-
-    model.fit(train_generator, validation_data=val_generator, epochs=50, verbose=1, callbacks=[EarlyStopping(patience=5)])
-    model.save("models/lstm_model_3.h5")
-    joblib.dump(scaler, "models/lstm_scaler_3.pkl")
-
-    print("✅ LSTM model and scaler saved")
-
-
-def train_xgboost_time_split(X, y, preprocessor):
+def train_xgboost(X, y, preprocessor):
     model = Pipeline(steps=[
         ("preprocessor", preprocessor),
-        ("regressor", XGBRegressor(random_state=42))
+        ("regressor", XGBRegressor(
+            random_state=42,
+            max_depth=3,
+            colsample_bytree=0.5,
+            reg_lambda=1,
+            gamma=0.2
+        ))
     ])
 
     tscv = TimeSeriesSplit(n_splits=5)
     scores = cross_val_score(model, X, y, cv=tscv, scoring='neg_root_mean_squared_error')
-
-    print("TimeSeries Cross-Validation RMSE scores:", -scores)
-    print("Average CV RMSE:", -scores.mean())
+    print("📊 XGBoost TimeSeries CV RMSE:", -scores.mean())
 
     model.fit(X, y)
-    joblib.dump(model, "models/xgboost_model_3.pkl")
-    print("✅ XGBoost model saved ")
+    joblib.dump(model, r"/Users/rahulbalasubramani/Desktop/MSIM Study Materials/2nd Sem/IS_MDS/MoDS_FinalProject/final_output/xgboost_model.pkl")
+    print("✅ XGBoost model saved.")
+    return model
 
+def show_filtered_feature_importance(model):
+    xgb = model.named_steps['regressor']
+    preprocessor = model.named_steps['preprocessor']
+    importances = xgb.feature_importances_
+    plot_filtered_feature_importance(preprocessor, importances)
 
 def main():
-    df = load_data("food_price_prediction_dataset.csv")
-
-    print("Training ARIMA...")
-    train_arima(df)
-
-    print("Training LSTM...")
-    train_lstm(df)
-
-    print("Preparing data and training XGBoost...")
+    df = load_data(r"/Users/rahulbalasubramani/Desktop/MSIM Study Materials/2nd Sem/IS_MDS/MoDS_FinalProject/final_output/final_dataset.csv")
     X, y, preprocessor = preprocess_data(df)
-    train_xgboost_time_split(X, y, preprocessor)
-
+    model = train_xgboost(X, y, preprocessor)
+    show_filtered_feature_importance(model)
 
 if __name__ == "__main__":
     main()
